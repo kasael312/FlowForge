@@ -1,4 +1,4 @@
-"""Shared fixtures: in-memory SQLite database and a TestClient bound to it."""
+"""Shared fixtures: in-memory SQLite database, TestClient and executor fakes."""
 
 from collections.abc import Generator
 
@@ -10,12 +10,18 @@ from sqlalchemy.pool import StaticPool
 
 from app import models  # noqa: F401  (register tables)
 from app.db import Base, get_db
+from app.executor.agent import AgentConfig
+from app.executor.engine import ExecutorDeps
+from app.executor.events import RunEventBus
 from app.main import app
+from tests.fakes import FakeAnthropic, FakeSandbox, FakeWorkspace
+
+WHITELIST = frozenset({"ls", "cat", "pytest", "npm", "git", "python", "make"})
 
 
 @pytest.fixture
-def db_session() -> Generator[Session, None, None]:
-    """Fresh in-memory database per test."""
+def session_factory() -> Generator[sessionmaker[Session], None, None]:
+    """Session factory bound to a fresh in-memory database."""
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -23,12 +29,19 @@ def db_session() -> Generator[Session, None, None]:
     )
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    session = factory()
+    try:
+        yield factory
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def db_session(session_factory: sessionmaker[Session]) -> Generator[Session, None, None]:
+    session = session_factory()
     try:
         yield session
     finally:
         session.close()
-        engine.dispose()
 
 
 @pytest.fixture
@@ -45,31 +58,59 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
 
 
 @pytest.fixture
+def fake_sandbox() -> FakeSandbox:
+    return FakeSandbox(files={"README.md": "# demo\n", "src/app.py": "print('hi')\n"})
+
+
+@pytest.fixture
+def fake_client() -> FakeAnthropic:
+    return FakeAnthropic()
+
+
+@pytest.fixture
+def deps(
+    session_factory: sessionmaker[Session], fake_sandbox: FakeSandbox, fake_client: FakeAnthropic
+) -> ExecutorDeps:
+    """Executor dependencies wired to the fakes."""
+    return ExecutorDeps(
+        client=fake_client,  # type: ignore[arg-type]
+        agent_config=AgentConfig(model="claude-test", use_fallbacks=True, effort="medium"),
+        sandbox_factory=lambda run_id, host_path: fake_sandbox,
+        workspace=FakeWorkspace(),
+        session_factory=session_factory,
+        bus=RunEventBus(),
+        shell_whitelist=WHITELIST,
+        max_steps_per_run=20,
+    )
+
+
+def make_step(id_: str, type_: str, **extra: object) -> dict:
+    """Build a React Flow node dict for tests."""
+    return {
+        "id": id_,
+        "type": "step",
+        "position": {"x": 0, "y": 0},
+        "data": {
+            "type": type_,
+            "label": id_,
+            "system_prompt": f"You are the {type_} step.",
+            **extra,
+        },
+    }
+
+
+@pytest.fixture
 def sample_flow() -> dict:
-    """A small valid flow: plan -> code -> test -> condition -> (review | code)."""
-
-    def step(id_: str, type_: str, **extra: object) -> dict:
-        return {
-            "id": id_,
-            "type": "step",
-            "position": {"x": 0, "y": 0},
-            "data": {
-                "type": type_,
-                "label": id_,
-                "system_prompt": f"You are the {type_} step.",
-                **extra,
-            },
-        }
-
+    """plan -> code -> test -> condition -> (review | code)."""
     return {
         "name": "Fix issue",
         "description": "sample",
         "nodes": [
-            step("plan", "plan"),
-            step("code", "code"),
-            step("test", "test", on_fail="goto:code", retry_limit=2),
-            step("check", "condition", expression="prev.success"),
-            step("review", "review"),
+            make_step("plan", "plan"),
+            make_step("code", "code"),
+            make_step("test", "test", on_fail="goto:code", retry_limit=2),
+            make_step("check", "condition", expression="prev.success"),
+            make_step("review", "review"),
         ],
         "edges": [
             {"id": "e1", "source": "plan", "target": "code"},

@@ -12,12 +12,20 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-5-5"
+    anthropic_model: str = "claude-opus-5-5"
+    # Server-side refusal fallbacks (Claude API only). Disable on Bedrock/Vertex.
+    anthropic_fallbacks: bool = True
+    # Effort level: low | medium | high | xhigh | max. Empty = model default.
+    anthropic_effort: str = "medium"
 
     database_url: str = "sqlite:///./data/flowforge.db"
     workspace_dir: str = "./data/workspaces"
     host_workspace_dir: str | None = None
     sandbox_image: str = "flowforge-sandbox:latest"
+    # Docker network for sandboxes. "none" blocks all egress; use "bridge" if
+    # steps must install dependencies.
+    sandbox_network: str = "none"
+    max_steps_per_run: int = Field(default=50, ge=1)
     shell_whitelist: str = "ls,cat,grep,find,pytest,npm,npx,node,python,python3,pip,git,make"
     cors_origins: str = "http://localhost:5173"
 

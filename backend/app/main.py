@@ -8,14 +8,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.db import init_db
-from app.routers import flows
+from app.routers import flows, runs
+from app.services.runs import run_manager
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Create tables on startup."""
+    """Create tables on startup; cancel in-flight runs on shutdown."""
     init_db()
     yield
+    await run_manager.shutdown()
 
 
 app = FastAPI(title="FlowForge", version="0.1.0", lifespan=lifespan)
@@ -27,6 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(flows.router)
+app.include_router(runs.router)
 
 
 @app.get("/health")

@@ -79,7 +79,7 @@ def update_flow(flow_id: str, body: FlowUpdate, db: DbSession) -> Flow:
         try:
             validate_graph(nodes, edges)
         except ValueError as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
         flow.nodes = _dump(nodes)
         flow.edges = _dump(edges)
 
