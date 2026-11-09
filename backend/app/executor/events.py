@@ -75,6 +75,12 @@ class RunEventBus:
         self._subs.pop(run_id, None)
         self._closed.discard(run_id)
 
+    def reset(self) -> None:
+        """Drop everything (tests)."""
+        self._history.clear()
+        self._subs.clear()
+        self._closed.clear()
+
 
 bus = RunEventBus()
 """Process-wide bus shared by executor and API."""

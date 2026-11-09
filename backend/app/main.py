@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.db import init_db
-from app.routers import flows, runs
+from app.routers import flows, logs, runs
 from app.services.runs import run_manager
 
 
@@ -30,6 +30,7 @@ app.add_middleware(
 )
 app.include_router(flows.router)
 app.include_router(runs.router)
+app.include_router(logs.router)
 
 
 @app.get("/health")

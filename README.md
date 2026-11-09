@@ -57,6 +57,27 @@ docker compose up --build
 | GET | `/runs/{id}` | Chi tiết run kèm `final_diff` |
 | GET | `/runs/{id}/steps` | Các StepRun kèm toàn bộ `messages` và `tool_calls` |
 | POST | `/runs/{id}/cancel` | Hủy run đang chạy |
+| WS | `/runs/{id}/logs` | Stream log JSON của run (xem bên dưới) |
+
+### WebSocket log stream
+
+Kết nối `ws://localhost:8000/runs/{id}/logs`. Server gửi từng event dạng JSON và luôn kết thúc
+bằng `{"event": "end"}` rồi đóng kết nối. Run không tồn tại → close code `4404`.
+
+- Run đang chạy: gửi lại toàn bộ lịch sử đã buffer rồi stream live.
+- Run đã kết thúc: lịch sử được giữ trong bộ nhớ 10 phút; sau đó (hoặc sau khi restart backend)
+  event được dựng lại từ `StepRun` trong DB và đánh dấu `"replayed": true`.
+
+| `event` | Trường chính |
+|---|---|
+| `run_status` | `status` (`running` / `success` / `failed` / `cancelled`), `error` |
+| `step_start` | `step_id`, `step_run_id`, `type`, `attempt`, `label` |
+| `text` | `step_id`, `turn`, `text` (text model trả về) |
+| `tool_call` | `step_id`, `tool`, `input`, `tool_use_id` |
+| `tool_result` | `step_id`, `tool`, `output`, `is_error`, `duration` |
+| `step_end` | `step_id`, `status`, `duration`, `error`, `output` (2000 ký tự cuối) |
+| `log` | `message`, `level` (thông báo của executor: clone, retry, goto...) |
+| `end` | kết thúc stream |
 
 ### Cấu trúc graph
 
@@ -142,7 +163,7 @@ _(sẽ bổ sung ở bước rà soát)_
 - [x] 1. Khởi tạo monorepo, docker-compose, README khung
 - [x] 2. Backend: models + CRUD flows + test
 - [x] 3. Executor + tools + sandbox, test với mock
-- [ ] 4. WebSocket log stream
+- [x] 4. WebSocket log stream
 - [ ] 5. Frontend: Flows list + Flow Editor
 - [ ] 6. Frontend: Run + History
 - [ ] 7. Tích hợp GitHub tạo PR

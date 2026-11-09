@@ -24,8 +24,9 @@ log = logging.getLogger(__name__)
 class RunManager:
     """Owns the background tasks of in-flight runs."""
 
-    def __init__(self, deps: ExecutorDeps | None = None) -> None:
+    def __init__(self, deps: ExecutorDeps | None = None, history_ttl: float = 600.0) -> None:
         self._deps = deps
+        self.history_ttl = history_ttl
         self._executors: dict[str, FlowExecutor] = {}
         self._tasks: dict[str, asyncio.Task[RunStatus]] = {}
 
@@ -65,6 +66,9 @@ class RunManager:
         task = self._tasks.pop(run_id, None)
         if task and not task.cancelled() and task.exception():
             log.error("run %s failed: %r", run_id, task.exception())
+        # Keep the live log buffer around briefly for late WebSocket clients,
+        # then evict it; afterwards logs are rebuilt from the database.
+        asyncio.get_running_loop().call_later(self.history_ttl, self.deps.bus.forget, run_id)
 
     def is_active(self, run_id: str) -> bool:
         """Whether the run is currently executing in this process."""
