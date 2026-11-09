@@ -1,0 +1,40 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: flowforge-backend
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////data/flowforge.db
+      WORKSPACE_DIR: /data/workspaces
+      # Host path of the workspace dir, needed so the backend can bind-mount
+      # cloned repos into sibling sandbox containers via the Docker socket.
+      HOST_WORKSPACE_DIR: ${PWD}/data/workspaces
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - sandbox
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    container_name: flowforge-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+  # Builds the sandbox image only; it is not a long-running service.
+  # The backend starts one short-lived container from this image per run.
+  sandbox:
+    build:
+      context: ./sandbox
+    image: flowforge-sandbox:latest
+    container_name: flowforge-sandbox-builder
+    command: ["true"]
+    restart: "no"
