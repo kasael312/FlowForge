@@ -37,6 +37,39 @@ docker compose up --build
 | `GITHUB_TOKEN` | Token để tạo Pull Request. |
 | `VITE_API_URL` | URL backend mà frontend gọi tới. |
 
+## API
+
+| Method | Path | Mô tả |
+|---|---|---|
+| GET | `/flows` | Danh sách flow (tóm tắt) |
+| POST | `/flows` | Tạo flow: `{name, description, nodes[], edges[]}` |
+| GET | `/flows/{id}` | Chi tiết flow kèm graph |
+| PUT | `/flows/{id}` | Cập nhật một phần; graph được validate lại |
+| DELETE | `/flows/{id}` | Xóa flow và các run của nó |
+| POST | `/flows/{id}/duplicate` | Nhân bản flow |
+
+### Cấu trúc graph
+
+`nodes[]` là node React Flow với `data` là thuộc tính step:
+
+```json
+{
+  "id": "test", "type": "step", "position": {"x": 0, "y": 0},
+  "data": {
+    "label": "Run tests", "type": "test",
+    "system_prompt": "...", "tools_allowed": ["read_file", "run_shell"],
+    "max_turns": 20, "on_fail": "goto:code", "retry_limit": 2,
+    "command": null, "expression": null
+  }
+}
+```
+
+- `type`: `plan | code | test | review | shell | condition`.
+- `on_fail`: `retry | stop | goto:<step_id>` (step_id phải tồn tại).
+- `command`: chỉ dùng cho step `shell` (chạy lệnh trực tiếp, không gọi LLM).
+- `expression`: chỉ dùng cho step `condition`, ví dụ `prev.success`; edge đi ra phải có
+  `sourceHandle` là `"true"` hoặc `"false"`.
+
 ## Phát triển (không dùng Docker)
 
 ```bash
@@ -65,7 +98,7 @@ _(sẽ bổ sung ở bước rà soát)_
 ## Lộ trình
 
 - [x] 1. Khởi tạo monorepo, docker-compose, README khung
-- [ ] 2. Backend: models + CRUD flows + test
+- [x] 2. Backend: models + CRUD flows + test
 - [ ] 3. Executor + tools + sandbox, test với mock
 - [ ] 4. WebSocket log stream
 - [ ] 5. Frontend: Flows list + Flow Editor
