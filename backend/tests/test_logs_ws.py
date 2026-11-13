@@ -72,7 +72,11 @@ def test_live_stream(
         # except the clone log and the first step_start
         ev = ws.receive_json()
         assert ev["event"] == "log" and "cloned" in ev["message"]
-        ev = ws.receive_json()
+        # further executor notices (sandbox limits, ...) precede the first step
+        while True:
+            ev = ws.receive_json()
+            if ev["event"] != "log":
+                break
         assert ev["event"] == "step_start" and ev["step_id"] == "plan"
 
         client.portal.call(release.set)  # type: ignore[attr-defined]
@@ -138,7 +142,9 @@ def test_replay_from_db_after_history_evicted(
 
     replayed = _collect(client, run_id)
     assert all(e.get("replayed") for e in replayed[:-1])
-    assert [e["event"] for e in replayed] == [e["event"] for e in live if e["event"] != "log"]
+    assert [e["event"] for e in replayed] == [
+        e["event"] for e in live if e["event"] not in ("log", "variables", "output")
+    ]
     assert [e.get("step_id") for e in replayed if e["event"] == "step_start"] == [
         "plan",
         "code",

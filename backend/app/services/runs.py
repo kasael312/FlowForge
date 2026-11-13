@@ -4,19 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
-from anthropic import AsyncAnthropic
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.db import SessionLocal
-from app.executor.agent import AgentConfig
 from app.executor.engine import ExecutorDeps, FlowExecutor
 from app.executor.events import bus
-from app.executor.sandbox import docker_sandbox_factory
-from app.executor.workspace import GitWorkspace, validate_repo_ref
+from app.executor.sandbox import SandboxOptions, docker_sandbox_factory
+from app.executor.workspace import GitWorkspace, WorkspaceError, validate_repo_ref
 from app.models import Flow, Run, RunStatus
 from app.schemas import RunCreate
+from app.services.artifacts import ArtifactStore
+from app.services.mcp import mcp_tools_factory
+from app.services.models import make_resolver
+from app.services.toolctx import build_tool_context
 
 log = logging.getLogger(__name__)
 
@@ -37,14 +40,31 @@ class RunManager:
             self._deps = build_deps(get_settings())
         return self._deps
 
-    def create_run(self, db: Session, flow: Flow, body: RunCreate) -> Run:
-        """Persist a queued run (validates repo/branch first)."""
+    def create_run(self, db: Session, flow: Flow, body: RunCreate, *, user_id: str) -> Run:
+        """Persist a queued run owned by ``user_id``.
+
+        Validates the repository reference (empty = no repository) and the
+        submitted inputs against the flow's input schema.
+        """
+        from app.schemas import InputField, coerce_inputs
+
         validate_repo_ref(body.repo_url, body.branch)
+        fields = [InputField.model_validate(f) for f in (flow.input_schema or [])]
+        try:
+            inputs = coerce_inputs(fields, body.inputs)
+        except ValueError as exc:
+            raise WorkspaceError(str(exc)) from exc
+        sandbox = dict(flow.sandbox or {})
+        if body.sandbox is not None:
+            sandbox.update(body.sandbox.model_dump(exclude_none=True))
         run = Run(
             flow_id=flow.id,
+            user_id=user_id,
             repo_url=body.repo_url.strip(),
             branch=body.branch,
             task_input=body.task,
+            inputs=inputs,
+            sandbox=sandbox or None,
             status=RunStatus.queued,
         )
         db.add(run)
@@ -84,6 +104,15 @@ class RunManager:
         task.cancel()
         return True
 
+    def approve(self, run_id: str, decision: str, comment: str = "") -> bool:
+        """Resolve a pending approval of an active run; False when none is pending."""
+        executor = self._executors.get(run_id)
+        return bool(executor and executor.resolve_approval(decision, comment))
+
+    def pending_approval(self, run_id: str) -> str | None:
+        executor = self._executors.get(run_id)
+        return executor.pending_approval if executor else None
+
     async def shutdown(self) -> None:
         """Cancel every active run (application shutdown)."""
         for run_id in list(self._tasks):
@@ -95,19 +124,51 @@ class RunManager:
 def build_deps(settings: Settings) -> ExecutorDeps:
     """Production dependency wiring."""
     return ExecutorDeps(
-        client=AsyncAnthropic(api_key=settings.anthropic_api_key or None),
-        agent_config=AgentConfig(
-            model=settings.anthropic_model,
-            use_fallbacks=settings.anthropic_fallbacks,
-            effort=settings.anthropic_effort or None,
-        ),
+        provider_resolver=make_resolver(SessionLocal, settings),
         sandbox_factory=docker_sandbox_factory(settings.sandbox_image, settings.sandbox_network),
         workspace=GitWorkspace(settings.workspace_dir, settings.host_workspace_dir),
         session_factory=SessionLocal,
         bus=bus,
         shell_whitelist=settings.shell_whitelist_set,
         max_steps_per_run=settings.max_steps_per_run,
+        tool_context_factory=lambda uid: build_tool_context(SessionLocal, settings, uid),
+        mcp_tools_factory=mcp_tools_factory(SessionLocal),
+        upload_reader=lambda uid, upload_id: _read_upload(uid, upload_id),
+        artifact_store=ArtifactStore(SessionLocal, settings),
+        skill_loader=_load_skills,
+        rule_loader=_load_rules,
+        sandbox_caps=SandboxOptions(
+            cpus=settings.sandbox_max_cpus,
+            memory_mb=settings.sandbox_max_memory_mb,
+            timeout_seconds=settings.sandbox_max_timeout_seconds,
+            network=settings.sandbox_network,
+            max_network=settings.sandbox_max_network,
+        ),
     )
+
+
+def _load_skills(user_id: str | None, ids: list[str]) -> tuple[list[Any], list[str]]:
+    from app.services.skills import load_bundles, materialize, resolve_skills
+
+    with SessionLocal() as db:
+        skills, _ = resolve_skills(db, user_id, ids)
+        for s in skills:  # on-disk cache (data/skills/<id>/) for inspection and debugging
+            materialize(s, get_settings().skills_dir)
+        return load_bundles(db, user_id, ids)
+
+
+def _load_rules(user_id: str | None, flow_id: str | None, step_id: str) -> str:
+    from app.services.rules import load_rules_block
+
+    with SessionLocal() as db:
+        return load_rules_block(db, user_id, flow_id, step_id)
+
+
+def _read_upload(user_id: str | None, upload_id: str) -> tuple[str, bytes]:
+    from app.services.uploads import read_upload
+
+    with SessionLocal() as db:
+        return read_upload(db, get_settings(), user_id, upload_id)
 
 
 run_manager = RunManager()

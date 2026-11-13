@@ -1,23 +1,24 @@
-"""The per-step agent loop: call Claude, execute tools, repeat until done."""
+"""The per-step agent loop: call the model, execute tools, repeat until done.
+
+Provider-agnostic: any :class:`LLMProvider` works, tool calls are normalised
+by the provider into :class:`ToolCall` objects.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from anthropic import AsyncAnthropic
-
-from app.executor.tools import ToolError, ToolExecutor, tool_definitions
+from app.executor.tools import ToolError, ToolExecutor
+from app.llm.base import LLMProvider, ToolSpec
 
 LogFn = Callable[..., None]
 """``log(event, **data)`` callback used to stream progress."""
 
 MAX_TOKENS = 16_000
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
 @dataclass(slots=True)
@@ -28,26 +29,18 @@ class AgentResult:
     output: str
     messages: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model: str = ""
     error: str | None = None
 
-
-@dataclass(slots=True)
-class AgentConfig:
-    """Model configuration shared by all steps of a run."""
-
-    model: str
-    use_fallbacks: bool = True
-    effort: str | None = None
-
-
-def _text_of(content: list[Any]) -> str:
-    return "\n".join(b.text for b in content if getattr(b, "type", None) == "text").strip()
+    @property
+    def tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
 
 
 async def run_agent(
-    client: AsyncAnthropic,
-    config: AgentConfig,
+    provider: LLMProvider,
     *,
     system_prompt: str,
     user_message: str,
@@ -59,75 +52,53 @@ async def run_agent(
 ) -> AgentResult:
     """Run the tool-use loop for one step.
 
-    The loop ends when the model stops calling tools (``end_turn``), when it is
-    refused or truncated, when ``max_turns`` is hit, or when ``cancel`` is set.
-    All messages and tool calls are recorded on the returned :class:`AgentResult`.
+    The loop ends when the model stops calling tools, when it is refused or
+    truncated, when ``max_turns`` is hit, or when ``cancel`` is set.
+    :class:`ProviderError` propagates to the caller (which may fall back to
+    another model). All messages and tool calls are recorded on the result.
     """
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
-    result = AgentResult(success=False, output="", messages=messages)
-    tools = tool_definitions(tools_allowed)
+    result = AgentResult(success=False, output="", messages=messages, model=provider.label)
+    tools = [ToolSpec.from_dict(t) for t in executor.definitions(tools_allowed)]
 
     for turn in range(1, max_turns + 1):
         if cancel is not None and cancel.is_set():
             result.error = "cancelled"
             return result
 
-        kwargs: dict[str, Any] = {
-            "model": config.model,
-            "max_tokens": MAX_TOKENS,
-            "system": system_prompt,
-            "messages": messages,
-        }
-        if tools:
-            kwargs["tools"] = tools
-        if config.effort:
-            kwargs["output_config"] = {"effort": config.effort}
-        if config.use_fallbacks:
-            kwargs["betas"] = [FALLBACK_BETA]
-            kwargs["fallbacks"] = "default"
-
-        response = await client.beta.messages.create(**kwargs)
-        usage = response.usage
-        result.tokens += int(getattr(usage, "input_tokens", 0) or 0) + int(
-            getattr(usage, "output_tokens", 0) or 0
+        completion = await provider.complete(
+            messages, tools=tools or None, system=system_prompt, max_tokens=MAX_TOKENS
         )
+        result.input_tokens += completion.usage.input_tokens
+        result.output_tokens += completion.usage.output_tokens
+        if completion.model:
+            result.model = f"{provider.kind}/{completion.model}"
 
-        assistant_content = response.model_dump(mode="json")["content"]
-        messages.append({"role": "assistant", "content": assistant_content})
+        messages.append({"role": "assistant", "content": completion.content})
+        if completion.text:
+            log("text", turn=turn, text=completion.text)
 
-        text = _text_of(response.content)
-        if text:
-            log("text", turn=turn, text=text)
-
-        stop = response.stop_reason
-        if stop == "refusal":
-            details = getattr(response, "stop_details", None)
-            cat = getattr(details, "category", None) if details else None
-            result.error = f"model refused the request ({cat or 'unspecified'})"
-            result.output = text
+        if completion.stop_reason == "refusal":
+            result.error = f"model refused the request ({completion.detail or 'unspecified'})"
+            result.output = completion.text
             return result
-        if stop == "max_tokens":
+        if completion.stop_reason == "max_tokens":
             result.error = "response truncated (max_tokens)"
-            result.output = text
+            result.output = completion.text
             return result
-        if stop == "pause_turn":
-            continue
-
-        tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
-        if stop != "tool_use" or not tool_uses:
+        if completion.stop_reason != "tool_use" or not completion.tool_calls:
             result.success = True
-            result.output = text
+            result.output = completion.text
             return result
 
         tool_results: list[dict[str, Any]] = []
-        for tu in tool_uses:
-            raw_input = tu.input if isinstance(tu.input, dict) else json.loads(str(tu.input))
-            log("tool_call", turn=turn, tool=tu.name, input=raw_input, tool_use_id=tu.id)
+        for call in completion.tool_calls:
+            log("tool_call", turn=turn, tool=call.name, input=call.arguments, tool_use_id=call.id)
             started = time.monotonic()
             try:
-                if tu.name not in tools_allowed:
-                    raise ToolError(f"tool {tu.name!r} is not allowed in this step")
-                output = await executor.call(tu.name, raw_input)
+                if call.name not in tools_allowed:
+                    raise ToolError(f"tool {call.name!r} is not allowed in this step")
+                output = await executor.call(call.name, call.arguments)
                 is_error = False
             except ToolError as exc:
                 output, is_error = f"Error: {exc}", True
@@ -136,18 +107,18 @@ async def run_agent(
             duration = round(time.monotonic() - started, 3)
             record = {
                 "turn": turn,
-                "tool": tu.name,
-                "input": raw_input,
+                "tool": call.name,
+                "input": call.arguments,
                 "output": output,
                 "is_error": is_error,
                 "duration": duration,
             }
             result.tool_calls.append(record)
-            log("tool_result", **record, tool_use_id=tu.id)
+            log("tool_result", **record, tool_use_id=call.id)
             tool_results.append(
                 {
                     "type": "tool_result",
-                    "tool_use_id": tu.id,
+                    "tool_use_id": call.id,
                     "content": output,
                     "is_error": is_error,
                 }

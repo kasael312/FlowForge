@@ -1,10 +1,19 @@
 @import 'tailwindcss';
 @import '@xyflow/react/dist/style.css';
 
-:root {
-  color-scheme: light dark;
-}
+/* Dark mode is driven by data-theme on <html> (set from the theme toggle). */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
 
 body {
   @apply bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100;
+}
+
+[data-theme='dark'] .react-flow {
+  --xy-background-color-default: #09090b;
+  --xy-background-pattern-color-default: #3f3f46;
+  --xy-edge-stroke-default: #a1a1aa;
+  --xy-controls-button-background-color-default: #18181b;
+  --xy-controls-button-color-default: #e4e4e7;
+  --xy-controls-button-border-color-default: #3f3f46;
+  --xy-minimap-background-color-default: #18181b;
 }

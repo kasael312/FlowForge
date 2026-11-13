@@ -25,12 +25,27 @@ DEFAULT_PROMPTS: dict[StepType, str] = {
         "Review the current diff for correctness, security and style. Do not change files "
         "unless you find a clear bug. Reply with a short review and a verdict: APPROVE or REQUEST_CHANGES."
     ),
+    StepType.custom: "",
     StepType.shell: "",
     StepType.condition: "",
+    StepType.data_transform: "",
+    StepType.http_request: "",
+    StepType.loop: "",
+    StepType.merge: "",
+    StepType.template: "",
+    StepType.output: "",
+    StepType.approval: "",
 }
 
 
-def system_prompt_for(step_type: StepType, custom: str) -> str:
-    """Compose the base rules with the step's own or default prompt."""
+def system_prompt_for(
+    step_type: StepType, custom: str, *, skills: str = "", rules: str = ""
+) -> str:
+    """Compose the step's system prompt.
+
+    Order: base rules → user rules (``rules``) → skills (``skills``) → the step's own
+    prompt (or the default prompt for its type).
+    """
     body = custom.strip() or DEFAULT_PROMPTS.get(step_type, "")
-    return f"{BASE_RULES}\n\n{body}".strip()
+    parts = [BASE_RULES, rules.strip(), skills.strip(), body]
+    return "\n\n".join(p for p in parts if p).strip()

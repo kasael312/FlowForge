@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 500 /home/ubuntu/Documents/FLowManage/backend/.venv/bin/python -I sandbox_verify.py)"
+    ]
+  }
+}

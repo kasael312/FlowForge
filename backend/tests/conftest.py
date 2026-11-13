@@ -10,9 +10,9 @@ from sqlalchemy.pool import StaticPool
 
 from app import models  # noqa: F401  (register tables)
 from app.db import Base, get_db
-from app.executor.agent import AgentConfig
 from app.executor.engine import ExecutorDeps
 from app.executor.events import RunEventBus
+from app.llm import AnthropicProvider, ModelParams
 from app.main import app
 from tests.fakes import FakeAnthropic, FakeSandbox, FakeWorkspace
 
@@ -45,8 +45,8 @@ def db_session(session_factory: sessionmaker[Session]) -> Generator[Session, Non
 
 
 @pytest.fixture
-def client(db_session: Session) -> Generator[TestClient, None, None]:
-    """TestClient whose ``get_db`` dependency is overridden with the test session."""
+def anon_client(db_session: Session) -> Generator[TestClient, None, None]:
+    """Unauthenticated TestClient bound to the test database."""
 
     def _override() -> Generator[Session, None, None]:
         yield db_session
@@ -55,6 +55,26 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+DEFAULT_PASSWORD = "test-password-123"
+
+
+def login(client: TestClient, email: str, password: str = DEFAULT_PASSWORD) -> str:
+    """Register-or-login ``email`` on ``client`` (cookies persist). Returns user id."""
+    client.cookies.clear()
+    r = client.post("/auth/register", json={"email": email, "password": password})
+    if r.status_code == 409:
+        r = client.post("/auth/login", json={"email": email, "password": password})
+    assert r.status_code in (200, 201), r.text
+    return r.json()["id"]
+
+
+@pytest.fixture
+def client(anon_client: TestClient) -> TestClient:
+    """TestClient logged in as ``user@example.com``."""
+    login(anon_client, "user@example.com")
+    return anon_client
 
 
 @pytest.fixture
@@ -73,9 +93,13 @@ def deps(
 ) -> ExecutorDeps:
     """Executor dependencies wired to the fakes."""
     return ExecutorDeps(
-        client=fake_client,  # type: ignore[arg-type]
-        agent_config=AgentConfig(model="claude-test", use_fallbacks=True, effort="medium"),
-        sandbox_factory=lambda run_id, host_path: fake_sandbox,
+        provider_resolver=lambda user_id, model_id: AnthropicProvider(
+            "claude-test",
+            client=fake_client,  # type: ignore[arg-type]
+            params=ModelParams(effort="medium"),
+            use_fallbacks=True,
+        ),
+        sandbox_factory=lambda run_id, host_path, options=None: fake_sandbox,
         workspace=FakeWorkspace(),
         session_factory=session_factory,
         bus=RunEventBus(),
@@ -120,3 +144,26 @@ def sample_flow() -> dict:
             {"id": "e5", "source": "check", "target": "code", "sourceHandle": "false"},
         ],
     }
+
+
+@pytest.fixture(autouse=True)
+def _fake_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never touch DNS: every public-looking name resolves to a public address."""
+    from app import net
+
+    def resolve(host: str) -> list[str]:
+        if host.endswith(".test-private"):
+            return ["10.0.0.5"]
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(net, "resolver_override", resolve)
+
+
+@pytest.fixture(autouse=True)
+def industry_tools_db(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Industry tools open their own sessions: point them at the test database."""
+    from app.tools import industry
+
+    monkeypatch.setattr(industry, "session_factory", session_factory)

@@ -24,6 +24,7 @@ class FakeSandbox:
     """
 
     files: dict[str, str] = field(default_factory=dict)
+    binaries: dict[str, bytes] = field(default_factory=dict)
     scripted: dict[str, ExecResult | Callable[[list[str]], ExecResult]] = field(
         default_factory=dict
     )
@@ -36,6 +37,17 @@ class FakeSandbox:
 
     async def stop(self) -> None:
         self.stopped = True
+
+    async def read_bytes(self, path: str) -> bytes:
+        rel = _rel(path)
+        if rel in self.binaries:
+            return self.binaries[rel]
+        if rel in self.files:
+            return self.files[rel].encode()
+        raise FileNotFoundError(path)
+
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        self.binaries[_rel(path)] = data
 
     async def exec(
         self,
@@ -54,7 +66,7 @@ class FakeSandbox:
         match argv:
             case ["cat", "--", path]:
                 return self._cat(path)
-            case ["tee", "--", path]:
+            case ["tee", "--", path] | ["tee", path]:
                 self.files[_rel(path)] = stdin or ""
                 return ExecResult(0, stdin or "", "")
             case ["mkdir", "-p", "--", _]:

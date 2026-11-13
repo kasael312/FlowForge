@@ -10,10 +10,15 @@ services:
       # Host path of the workspace dir, needed so the backend can bind-mount
       # cloned repos into sibling sandbox containers via the Docker socket.
       HOST_WORKSPACE_DIR: ${PWD}/data/workspaces
+    # Exposed on every interface; put a reverse proxy with TLS in front (COOKIE_SECURE=true)
+    # or change to "127.0.0.1:8000:8000" when only this machine should reach the API.
     ports:
       - "8000:8000"
     volumes:
       - ./data:/data
+      # The backend drives sandbox containers through the Docker socket, which is
+      # equivalent to root on the host: run FlowForge only on a machine you trust, and
+      # consider a docker-socket-proxy that exposes just containers/exec/networks.
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - sandbox

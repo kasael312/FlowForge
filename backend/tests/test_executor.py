@@ -10,20 +10,26 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.executor.engine import ExecutorDeps, FlowExecutor, FlowGraphError, find_start
 from app.executor.sandbox import ExecResult
+from app.llm import AnthropicProvider
 from app.models import Flow, Run, RunStatus, StepRun, StepRunStatus
 from app.schemas import Edge, FlowCreate, Node
 from tests.conftest import make_step
 from tests.fakes import FakeAnthropic, FakeSandbox, FakeWorkspace, text_response, tool_response
 
 
-def _create(db_session: Session, flow_dict: dict, *, task: str = "fix the bug") -> str:
-    body = FlowCreate.model_validate(flow_dict)
-    flow = Flow(
-        name=body.name,
-        description=body.description,
-        nodes=[n.model_dump(mode="json") for n in body.nodes],
-        edges=[e.model_dump(mode="json") for e in body.edges],
-    )
+def _create(
+    db_session: Session, flow_dict: dict, *, task: str = "fix the bug", validate: bool = True
+) -> str:
+    """Persist a flow + queued run. ``validate=False`` stores a graph the API
+    would reject, to exercise the executor's own runtime guards."""
+    if validate:
+        body = FlowCreate.model_validate(flow_dict)
+        nodes = [n.model_dump(mode="json") for n in body.nodes]
+        edges = [e.model_dump(mode="json") for e in body.edges]
+    else:
+        nodes = [Node.model_validate(n).model_dump(mode="json") for n in flow_dict["nodes"]]
+        edges = [Edge.model_validate(e).model_dump(mode="json") for e in flow_dict["edges"]]
+    flow = Flow(name=flow_dict["name"], description="", nodes=nodes, edges=edges)
     db_session.add(flow)
     db_session.flush()
     run = Run(
@@ -225,7 +231,7 @@ async def test_infinite_loop_guard(
             {"id": "2", "source": "b", "target": "a"},
         ],
     }
-    run_id = _create(db_session, flow)
+    run_id = _create(db_session, flow, validate=False)
     # a has an incoming edge from b -> no start node
     with pytest.raises(FlowGraphError):
         find_start(
@@ -255,7 +261,7 @@ async def test_infinite_loop_guard(
     }
     fake_client.responses = [text_response("x", stop_reason="refusal")] * 100
     deps.max_steps_per_run = 6
-    run_id = _create(db_session, flow)
+    run_id = _create(db_session, flow, validate=False)
     assert await FlowExecutor(deps, run_id).execute() is RunStatus.failed
     assert len(_steps(deps.session_factory, run_id)) == 6
     assert "exceeded 6" in (_run(deps.session_factory, run_id).error or "")
@@ -284,7 +290,10 @@ async def test_cancel_mid_run(
 
     slow = SlowClient()
     slow.beta.messages.create = slow._slow  # type: ignore[method-assign]
-    deps.client = slow  # type: ignore[assignment]
+    deps.provider_resolver = lambda user_id, model_id: AnthropicProvider(
+        "claude-test",
+        client=slow,  # type: ignore[arg-type]
+    )
     run_id = _create(db_session, sample_flow)
     executor = FlowExecutor(deps, run_id)
     task = asyncio.create_task(executor.execute())

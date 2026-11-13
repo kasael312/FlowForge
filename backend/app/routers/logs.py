@@ -6,10 +6,11 @@ import asyncio
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import get_current_user
 from app.db import get_db
 from app.executor.events import bus
 from app.models import Run, RunStatus, StepRun
@@ -18,6 +19,7 @@ from app.services.replay import replay_events
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["runs"])
 
+WS_UNAUTHORIZED = 4401
 WS_NOT_FOUND = 4404
 END_EVENT = {"event": "end"}
 
@@ -34,14 +36,19 @@ async def run_logs(
       events until the run finishes.
     * Run already finished (or history evicted): rebuild the events from the
       database and send them in one go.
-    * Unknown run: close with code 4404.
+    * Not authenticated: close with code 4401. Unknown/foreign run: 4404.
 
     The stream always ends with ``{"event": "end"}`` followed by a close.
     """
-    run = db.get(Run, run_id)
+    # Accept first so the client sees a proper close code instead of HTTP 403.
     await websocket.accept()
-    if run is None:
-        # Accept first so the client sees a proper close code instead of HTTP 403.
+    try:
+        user = get_current_user(websocket, db)
+    except HTTPException:
+        await websocket.close(code=WS_UNAUTHORIZED, reason="not authenticated")
+        return
+    run = db.get(Run, run_id)
+    if run is None or run.user_id != user.id:
         await websocket.close(code=WS_NOT_FOUND, reason="run not found")
         return
 

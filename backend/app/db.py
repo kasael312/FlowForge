@@ -29,11 +29,27 @@ engine: Engine = _make_engine(get_settings().database_url)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
-def init_db() -> None:
-    """Create all tables. Called on application startup."""
+def init_db(target: Engine | None = None) -> None:
+    """Create all tables and add columns that were introduced after the DB was made.
+
+    This is a minimal stand-in for migrations, good enough for SQLite in dev:
+    new nullable columns are added with ``ALTER TABLE ... ADD COLUMN``.
+    """
+    from sqlalchemy import inspect, text
+
     from app import models  # noqa: F401  (register models on Base)
 
-    Base.metadata.create_all(bind=engine)
+    eng = target or engine
+    Base.metadata.create_all(bind=eng)
+    inspector = inspect(eng)
+    with eng.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in existing or not col.nullable:
+                    continue
+                ddl = f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col.type.compile(eng.dialect)}"
+                conn.execute(text(ddl))
 
 
 def get_db() -> Generator[Session, None, None]:
